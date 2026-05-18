@@ -1,0 +1,71 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install GTK3 runtime (required by WeasyPrint)
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://github.com/tschoonj/GTK-for-Windows-Runtime-Environment-Installer/releases/download/2022-01-04/gtk3-runtime-3.24.31-2022-01-04-ts-win64.exe"
+          Invoke-WebRequest -Uri $url -OutFile gtk3-runtime.exe
+          Start-Process -FilePath ".\gtk3-runtime.exe" -ArgumentList "/S /D=C:\GTK3" -Wait
+          "C:\GTK3\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pyinstaller-hooks-contrib
+
+      - name: Build executable with PyInstaller
+        env:
+          GTK3_BIN: C:\GTK3\bin
+        run: pyinstaller app.spec
+
+      - name: Create ZIP archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\MarkdownToPDF -DestinationPath MarkdownToPDF-Windows.zip
+          $size = (Get-Item MarkdownToPDF-Windows.zip).length / 1MB
+          Write-Host "ZIP size: $([math]::Round($size,1)) MB"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MarkdownToPDF-Windows
+          path: MarkdownToPDF-Windows.zip
+          retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "MarkdownToPDF v${{ github.run_number }}"
+          body: |
+            ## Download
+
+            Baixe o arquivo `MarkdownToPDF-Windows.zip`, extraia e execute `MarkdownToPDF.exe`.
+
+            **Requisitos:** Windows 10/11 64-bit. Nenhuma instalação do Python necessária.
+          files: MarkdownToPDF-Windows.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

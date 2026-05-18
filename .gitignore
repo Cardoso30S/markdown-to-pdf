@@ -8,3 +8,6 @@ build/
 .venv/
 venv/
 *.pdf
+*.spec.bak
+gtk3-runtime.exe
+MarkdownToPDF-Windows.zip
