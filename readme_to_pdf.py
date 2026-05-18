@@ -46,6 +46,15 @@ strong { font-weight: 700; } em { font-style: italic; }
 _PAGE_RULE_RE = re.compile(r"@page\s*\{[^}]*\}", re.DOTALL)
 CSS_PREVIEW = _PAGE_RULE_RE.sub("", CSS_STYLE).strip()
 
+# Patterns for Gemini/AI citation annotations that should not appear in output
+_CITE_RE = re.compile(r"\[cite_start\]|\[cite_end\]|\[cite:\s*[\d,\s]+\]", re.IGNORECASE)
+
+
+def _strip_citations(text: str) -> str:
+    """Remove [cite_start], [cite_end] and [cite: N, M] annotations."""
+    return _CITE_RE.sub("", text)
+
+
 _MD_EXTENSIONS = [
     "tables",
     "fenced_code",
@@ -62,7 +71,7 @@ _MD_EXTENSIONS = [
 # ---------------------------------------------------------------------------
 
 def _md_to_html_body(md_path: Path) -> str:
-    md_text = md_path.read_text(encoding="utf-8")
+    md_text = _strip_citations(md_path.read_text(encoding="utf-8"))
     return markdown.markdown(md_text, extensions=_MD_EXTENSIONS)
 
 
@@ -246,14 +255,25 @@ def run_gui() -> None:
         html_frame.pack(fill="both", expand=True, padx=1, pady=1)
 
     # ── bottom section ───────────────────────────────────────────────────────
-    bottom = tk.Frame(root, bg="#f1f5f9", pady=8, padx=12)
-    bottom.pack(fill="x")
+    bottom = tk.Frame(root, bg="#e2e8f0", pady=10, padx=12)
+    bottom.pack(fill="x", side="bottom")
+
+    # Status bar
+    tk.Label(
+        bottom,
+        textvariable=status_var,
+        bg="#e2e8f0",
+        fg="#374151",
+        font=("Segoe UI", 9),
+        anchor="w",
+        padx=4,
+    ).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
 
     # Output path row
     tk.Label(
         bottom,
-        text="Salvar:",
-        bg="#f1f5f9",
+        text="Salvar como:",
+        bg="#e2e8f0",
         font=("Segoe UI", 10),
     ).grid(row=0, column=0, sticky="w", padx=(0, 6))
 
@@ -284,21 +304,58 @@ def run_gui() -> None:
         bottom,
         text="Procurar",
         command=_browse_pdf,
-        bg="#3b82f6",
+        bg="#64748b",
         fg="white",
         relief="flat",
         padx=10,
         pady=4,
         font=("Segoe UI", 10),
         cursor="hand2",
-        activebackground="#2563eb",
+        activebackground="#475569",
         activeforeground="white",
     )
-    browse_pdf_btn.grid(row=0, column=2, padx=(6, 0))
+    browse_pdf_btn.grid(row=0, column=2, padx=(6, 6))
+
+    last_pdf: list[Path] = []
+
+    def _open_pdf() -> None:
+        if not last_pdf:
+            return
+        p = last_pdf[0]
+        if not p.exists():
+            status_var.set(f"Arquivo não encontrado: {p}")
+            return
+        import subprocess, os
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(p))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(p)])
+            else:
+                subprocess.Popen(["xdg-open", str(p)])
+        except Exception as exc:
+            status_var.set(f"Não foi possível abrir: {exc}")
+
+    open_btn = tk.Button(
+        bottom,
+        text="⬇ Baixar PDF",
+        command=_open_pdf,
+        bg="#0369a1",
+        fg="white",
+        relief="flat",
+        padx=14,
+        pady=6,
+        font=("Segoe UI", 10, "bold"),
+        cursor="hand2",
+        state="disabled",
+        activebackground="#075985",
+        activeforeground="white",
+    )
+    open_btn.grid(row=0, column=3, padx=(0, 0))
 
     bottom.columnconfigure(1, weight=1)
 
-    # Convert button
+    # Convert button — full width, prominent
     convert_btn = tk.Button(
         bottom,
         text="⚙  Converter para PDF",
@@ -306,26 +363,13 @@ def run_gui() -> None:
         fg="white",
         relief="flat",
         padx=14,
-        pady=8,
-        font=("Segoe UI", 11, "bold"),
+        pady=10,
+        font=("Segoe UI", 12, "bold"),
         cursor="hand2",
         activebackground="#15803d",
         activeforeground="white",
     )
-    convert_btn.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(10, 4))
-
-    # Status bar
-    tk.Label(
-        bottom,
-        textvariable=status_var,
-        bg="#e2e8f0",
-        fg="#374151",
-        font=("Segoe UI", 9),
-        anchor="w",
-        padx=8,
-        pady=4,
-        relief="flat",
-    ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 2))
+    convert_btn.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(8, 4))
 
     def _do_convert() -> None:
         md_str = md_path_var.get().strip()
@@ -341,20 +385,24 @@ def run_gui() -> None:
         pdf_p = Path(pdf_str) if pdf_str else md_p.with_suffix(".pdf")
 
         convert_btn.configure(state="disabled", bg="#6b7280")
+        open_btn.configure(state="disabled")
         status_var.set("Convertendo, aguarde...")
 
         def _worker() -> None:
             try:
                 convert(md_p, pdf_p)
-                msg = f"PDF gerado com sucesso: {pdf_p}"
-                btn_cfg = {"bg": "#16a34a"}
+                msg = f"✓ PDF gerado com sucesso: {pdf_p}"
+                def _done() -> None:
+                    status_var.set(msg)
+                    convert_btn.configure(state="normal", bg="#16a34a")
+                    last_pdf.clear()
+                    last_pdf.append(pdf_p)
+                    open_btn.configure(state="normal")
             except Exception as exc:
-                msg = f"Erro na conversão: {exc}"
-                btn_cfg = {"bg": "#dc2626"}
-
-            def _done() -> None:
-                status_var.set(msg)
-                convert_btn.configure(state="normal", **btn_cfg)
+                msg = f"✗ Erro na conversão: {exc}"
+                def _done() -> None:
+                    status_var.set(msg)
+                    convert_btn.configure(state="normal", bg="#dc2626")
 
             root.after(0, _done)
 
