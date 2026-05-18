@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Converte README.md (ou qualquer arquivo Markdown) em PDF com estilo limpo."""
+"""Markdown → PDF converter with a full Tkinter GUI and live HTML preview."""
 
-import argparse
+import re
 import sys
+import threading
 from pathlib import Path
 
 import markdown
@@ -41,22 +42,361 @@ img { max-width: 100%; height: auto; border-radius: 6px; }
 strong { font-weight: 700; } em { font-style: italic; }
 """
 
+# Strip @page { ... } block — it is PDF-only and not valid in browsers / tkinterweb
+_PAGE_RULE_RE = re.compile(r"@page\s*\{[^}]*\}", re.DOTALL)
+CSS_PREVIEW = _PAGE_RULE_RE.sub("", CSS_STYLE).strip()
+
+_MD_EXTENSIONS = [
+    "tables",
+    "fenced_code",
+    "codehilite",
+    "toc",
+    "nl2br",
+    "sane_lists",
+    "attr_list",
+]
+
+
+# ---------------------------------------------------------------------------
+# Core conversion helpers (shared between CLI and GUI)
+# ---------------------------------------------------------------------------
+
+def _md_to_html_body(md_path: Path) -> str:
+    md_text = md_path.read_text(encoding="utf-8")
+    return markdown.markdown(md_text, extensions=_MD_EXTENSIONS)
+
 
 def convert(md_path: Path, pdf_path: Path) -> None:
-    md_text = md_path.read_text(encoding="utf-8")
-    extensions = ["tables", "fenced_code", "codehilite", "toc", "nl2br", "sane_lists", "attr_list"]
-    html_body = markdown.markdown(md_text, extensions=extensions)
-    html_full = f"""<!DOCTYPE html>
-<html lang="pt-BR"><head><meta charset="UTF-8"><title>{md_path.stem}</title></head>
-<body>{html_body}</body></html>"""
-    HTML(string=html_full, base_url=str(md_path.parent)).write_pdf(str(pdf_path), stylesheets=[CSS(string=CSS_STYLE)])
+    """Convert *md_path* to a PDF file saved at *pdf_path*."""
+    html_body = _md_to_html_body(md_path)
+    html_full = (
+        f'<!DOCTYPE html>\n'
+        f'<html lang="pt-BR"><head><meta charset="UTF-8">'
+        f'<title>{md_path.stem}</title></head>\n'
+        f'<body>{html_body}</body></html>'
+    )
+    HTML(string=html_full, base_url=str(md_path.parent)).write_pdf(
+        str(pdf_path), stylesheets=[CSS(string=CSS_STYLE)]
+    )
 
+
+def build_preview_html(md_path: Path) -> str:
+    """Return a self-contained HTML string suitable for the GUI preview."""
+    html_body = _md_to_html_body(md_path)
+    return (
+        f'<!DOCTYPE html>\n'
+        f'<html lang="pt-BR">\n'
+        f'<head>\n'
+        f'<meta charset="UTF-8">\n'
+        f'<style>\n{CSS_PREVIEW}\n'
+        f'body {{ max-width: 860px; margin: 0 auto; padding: 24px 32px; }}\n'
+        f'</style>\n'
+        f'</head>\n'
+        f'<body>{html_body}</body>\n'
+        f'</html>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# GUI
+# ---------------------------------------------------------------------------
+
+def run_gui() -> None:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    try:
+        from tkinterweb import HtmlFrame
+        HAVE_HTMLFRAME = True
+    except ImportError:
+        HAVE_HTMLFRAME = False
+
+    # ── root window ──────────────────────────────────────────────────────────
+    root = tk.Tk()
+    root.title("Markdown → PDF Converter")
+    root.geometry("950x720")
+    root.resizable(True, True)
+    root.configure(bg="#f1f5f9")
+
+    # ── shared variables ─────────────────────────────────────────────────────
+    md_path_var = tk.StringVar()
+    pdf_path_var = tk.StringVar()
+    status_var = tk.StringVar(value="Aguardando...")
+    preview_label_var = tk.StringVar(value="Prévia do PDF:")
+
+    # ── header ───────────────────────────────────────────────────────────────
+    header = tk.Frame(root, bg="#1d4ed8", pady=14)
+    header.pack(fill="x")
+    tk.Label(
+        header,
+        text="Markdown → PDF Converter",
+        bg="#1d4ed8",
+        fg="white",
+        font=("Segoe UI", 16, "bold"),
+    ).pack()
+
+    # ── input row ────────────────────────────────────────────────────────────
+    input_frame = tk.Frame(root, bg="#f1f5f9", pady=8, padx=12)
+    input_frame.pack(fill="x")
+
+    tk.Label(
+        input_frame,
+        text="Arquivo:",
+        bg="#f1f5f9",
+        font=("Segoe UI", 10),
+    ).grid(row=0, column=0, sticky="w", padx=(0, 6))
+
+    md_entry = tk.Entry(
+        input_frame,
+        textvariable=md_path_var,
+        font=("Segoe UI", 10),
+        relief="flat",
+        bd=1,
+        highlightthickness=1,
+        highlightbackground="#cbd5e1",
+        highlightcolor="#3b82f6",
+    )
+    md_entry.grid(row=0, column=1, sticky="ew", ipady=4)
+
+    def _refresh_preview(p: Path) -> None:
+        """Render the markdown in a background thread then push HTML to the widget."""
+        def _worker() -> None:
+            try:
+                html = build_preview_html(p)
+            except Exception as exc:
+                html = f"<p style='color:red;font-family:sans-serif'>Erro ao renderizar prévia: {exc}</p>"
+
+            def _update() -> None:
+                if HAVE_HTMLFRAME:
+                    html_frame.load_html(html)
+                else:
+                    html_frame.configure(state="normal")
+                    html_frame.delete("1.0", "end")
+                    html_frame.insert("end", html)
+                    html_frame.configure(state="disabled")
+
+            root.after(0, _update)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _browse_md() -> None:
+        path = filedialog.askopenfilename(
+            title="Selecionar arquivo Markdown",
+            filetypes=[
+                ("Markdown files", "*.md *.markdown"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        md_path_var.set(path)
+        p = Path(path)
+        # Auto-fill PDF output path when not yet set
+        if not pdf_path_var.get():
+            pdf_path_var.set(str(p.with_suffix(".pdf")))
+        preview_label_var.set(f"Prévia do PDF:  ({p.name})")
+        status_var.set(f"Arquivo selecionado: {p.name}")
+        _refresh_preview(p)
+
+    browse_md_btn = tk.Button(
+        input_frame,
+        text="Procurar",
+        command=_browse_md,
+        bg="#3b82f6",
+        fg="white",
+        relief="flat",
+        padx=10,
+        pady=4,
+        font=("Segoe UI", 10),
+        cursor="hand2",
+        activebackground="#2563eb",
+        activeforeground="white",
+    )
+    browse_md_btn.grid(row=0, column=2, padx=(6, 0))
+
+    input_frame.columnconfigure(1, weight=1)
+
+    # ── preview area ─────────────────────────────────────────────────────────
+    preview_outer = tk.Frame(root, bg="#f1f5f9", padx=12)
+    preview_outer.pack(fill="both", expand=True)
+
+    tk.Label(
+        preview_outer,
+        textvariable=preview_label_var,
+        bg="#f1f5f9",
+        font=("Segoe UI", 10, "bold"),
+        anchor="w",
+    ).pack(fill="x", pady=(4, 2))
+
+    preview_border = tk.Frame(preview_outer, bg="#cbd5e1", bd=1, relief="flat")
+    preview_border.pack(fill="both", expand=True, pady=(0, 6))
+
+    if HAVE_HTMLFRAME:
+        html_frame = HtmlFrame(preview_border, messages_enabled=False)
+        html_frame.pack(fill="both", expand=True, padx=1, pady=1)
+    else:
+        # Graceful fallback when tkinterweb is unavailable
+        html_frame = tk.Text(
+            preview_border,
+            wrap="word",
+            font=("Segoe UI", 10),
+            relief="flat",
+            state="disabled",
+        )
+        html_frame.pack(fill="both", expand=True, padx=1, pady=1)
+
+    # ── bottom section ───────────────────────────────────────────────────────
+    bottom = tk.Frame(root, bg="#f1f5f9", pady=8, padx=12)
+    bottom.pack(fill="x")
+
+    # Output path row
+    tk.Label(
+        bottom,
+        text="Salvar:",
+        bg="#f1f5f9",
+        font=("Segoe UI", 10),
+    ).grid(row=0, column=0, sticky="w", padx=(0, 6))
+
+    pdf_entry = tk.Entry(
+        bottom,
+        textvariable=pdf_path_var,
+        font=("Segoe UI", 10),
+        relief="flat",
+        bd=1,
+        highlightthickness=1,
+        highlightbackground="#cbd5e1",
+        highlightcolor="#3b82f6",
+    )
+    pdf_entry.grid(row=0, column=1, sticky="ew", ipady=4)
+
+    def _browse_pdf() -> None:
+        initial = pdf_path_var.get() or "output.pdf"
+        path = filedialog.asksaveasfilename(
+            title="Salvar PDF como",
+            initialfile=Path(initial).name,
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+        )
+        if path:
+            pdf_path_var.set(path)
+
+    browse_pdf_btn = tk.Button(
+        bottom,
+        text="Procurar",
+        command=_browse_pdf,
+        bg="#3b82f6",
+        fg="white",
+        relief="flat",
+        padx=10,
+        pady=4,
+        font=("Segoe UI", 10),
+        cursor="hand2",
+        activebackground="#2563eb",
+        activeforeground="white",
+    )
+    browse_pdf_btn.grid(row=0, column=2, padx=(6, 0))
+
+    bottom.columnconfigure(1, weight=1)
+
+    # Convert button
+    convert_btn = tk.Button(
+        bottom,
+        text="⚙  Converter para PDF",
+        bg="#16a34a",
+        fg="white",
+        relief="flat",
+        padx=14,
+        pady=8,
+        font=("Segoe UI", 11, "bold"),
+        cursor="hand2",
+        activebackground="#15803d",
+        activeforeground="white",
+    )
+    convert_btn.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+
+    # Status bar
+    tk.Label(
+        bottom,
+        textvariable=status_var,
+        bg="#e2e8f0",
+        fg="#374151",
+        font=("Segoe UI", 9),
+        anchor="w",
+        padx=8,
+        pady=4,
+        relief="flat",
+    ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 2))
+
+    def _do_convert() -> None:
+        md_str = md_path_var.get().strip()
+        pdf_str = pdf_path_var.get().strip()
+
+        if not md_str:
+            status_var.set("Erro: nenhum arquivo Markdown selecionado.")
+            return
+        md_p = Path(md_str)
+        if not md_p.exists():
+            status_var.set(f"Erro: arquivo '{md_p}' não encontrado.")
+            return
+        pdf_p = Path(pdf_str) if pdf_str else md_p.with_suffix(".pdf")
+
+        convert_btn.configure(state="disabled", bg="#6b7280")
+        status_var.set("Convertendo, aguarde...")
+
+        def _worker() -> None:
+            try:
+                convert(md_p, pdf_p)
+                msg = f"PDF gerado com sucesso: {pdf_p}"
+                btn_cfg = {"bg": "#16a34a"}
+            except Exception as exc:
+                msg = f"Erro na conversão: {exc}"
+                btn_cfg = {"bg": "#dc2626"}
+
+            def _done() -> None:
+                status_var.set(msg)
+                convert_btn.configure(state="normal", **btn_cfg)
+
+            root.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    convert_btn.configure(command=_do_convert)
+
+    root.mainloop()
+
+
+# ---------------------------------------------------------------------------
+# CLI entry-point (kept for backward compatibility)
+# ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Converte um arquivo Markdown (.md) em PDF.")
-    parser.add_argument("input", nargs="?", default="README.md", help="Arquivo Markdown de entrada")
-    parser.add_argument("-o", "--output", default=None, help="Arquivo PDF de saída")
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Converte um arquivo Markdown (.md) em PDF."
+    )
+    parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Abrir interface gráfica",
+    )
+    parser.add_argument(
+        "input",
+        nargs="?",
+        default=None,
+        help="Arquivo Markdown de entrada (omitir abre a GUI)",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Arquivo PDF de saída",
+    )
     args = parser.parse_args()
+
+    if args.gui or args.input is None:
+        run_gui()
+        return
 
     md_path = Path(args.input)
     if not md_path.exists():
